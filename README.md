@@ -253,11 +253,5 @@ kubectl get pods -n av-pipeline
 
 ---
 
-## 📄 License
-
-MIT — see [LICENSE](LICENSE)
-
----
-
-Architecture designed by **Ankit Sharma**  
+Architecture designed by **Kishan Patel**  
 Built with Apache Spark · Kafka · Hudi · Delta Lake · FastAPI · React · Docker · Kubernetes
