@@ -1,0 +1,101 @@
+# ── Namespace ──────────────────────────────────────────────────────────────────
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: av-pipeline
+  labels:
+    name: av-pipeline
+    environment: production
+---
+# ── ServiceAccount & RBAC ──────────────────────────────────────────────────────
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: av-pipeline-sa
+  namespace: av-pipeline
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: av-pipeline-role
+  namespace: av-pipeline
+rules:
+  - apiGroups: [""]
+    resources: ["pods", "configmaps", "secrets"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["apps"]
+    resources: ["deployments"]
+    verbs: ["get", "list", "patch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: av-pipeline-rolebinding
+  namespace: av-pipeline
+subjects:
+  - kind: ServiceAccount
+    name: av-pipeline-sa
+    namespace: av-pipeline
+roleRef:
+  kind: Role
+  name: av-pipeline-role
+  apiGroup: rbac.authorization.k8s.io
+---
+# ── ConfigMap ──────────────────────────────────────────────────────────────────
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: av-pipeline-config
+  namespace: av-pipeline
+data:
+  kafka_bootstrap_servers: "kafka-headless.av-pipeline.svc.cluster.local:9092"
+  postgres_host: "postgres-svc.av-pipeline.svc.cluster.local"
+  postgres_port: "5432"
+  postgres_db: "av_metadata"
+  mongo_host: "mongodb-svc.av-pipeline.svc.cluster.local"
+  rabbitmq_host: "rabbitmq-svc.av-pipeline.svc.cluster.local"
+  spark_master: "k8s://https://kubernetes.default.svc"
+  spark_executor_instances: "15"
+  spark_executor_memory: "12g"
+  hdfs_base: "/tmp/av"
+  pipeline_mode: "batch"
+  log_level: "INFO"
+  watermark_delay: "10 minutes"
+---
+# ── Secrets (base64 encoded — use Sealed Secrets or Vault in production) ───────
+apiVersion: v1
+kind: Secret
+metadata:
+  name: av-pipeline-secrets
+  namespace: av-pipeline
+type: Opaque
+stringData:
+  mongo_uri: "mongodb://avadmin:avpassword@mongodb-svc:27017/av_pipeline?authSource=admin"
+  postgres_password: "avpassword"
+  rabbitmq_password: "avpassword"
+  jwt_secret: "av-pipeline-jwt-secret-change-in-production"
+---
+# ── PersistentVolumeClaims ─────────────────────────────────────────────────────
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: av-checkpoints-pvc
+  namespace: av-pipeline
+spec:
+  accessModes: [ReadWriteMany]
+  storageClassName: standard
+  resources:
+    requests:
+      storage: 50Gi
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: av-data-lake-pvc
+  namespace: av-pipeline
+spec:
+  accessModes: [ReadWriteMany]
+  storageClassName: standard
+  resources:
+    requests:
+      storage: 500Gi

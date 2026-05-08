@@ -1,0 +1,70 @@
+apiVersion: "sparkoperator.k8s.io/v1beta2"
+kind: SparkApplication
+metadata:
+  name: av-batch-pipeline
+  namespace: av-pipeline
+spec:
+  type: Python
+  pythonVersion: "3"
+  mode: cluster
+  image: "av-pipeline-backend:2.0"
+  imagePullPolicy: Always
+  mainApplicationFile: "local:///app/core/pipeline_driver.py"
+  arguments:
+    - "batch"
+    - "av_full_pipeline"
+  sparkVersion: "3.5.0"
+  restartPolicy:
+    type: OnFailure
+    onFailureRetries: 3
+    onFailureRetryInterval: 30
+    onSubmissionFailureRetries: 5
+    onSubmissionFailureRetryInterval: 20
+  driver:
+    cores: 2
+    coreLimit: "2000m"
+    memory: "4g"
+    serviceAccount: av-pipeline-sa
+    labels:
+      version: "2.0"
+    envVars:
+      - name: KAFKA_BOOTSTRAP_SERVERS
+        valueFrom:
+          configMapKeyRef:
+            name: av-pipeline-config
+            key: kafka_bootstrap_servers
+      - name: MONGO_URI
+        valueFrom:
+          secretKeyRef:
+            name: av-pipeline-secrets
+            key: mongo_uri
+    volumeMounts:
+      - name: checkpoints
+        mountPath: /tmp/av/checkpoints
+  executor:
+    cores: 4
+    coreLimit: "4000m"
+    memory: "12g"
+    memoryOverhead: "2g"
+    instances: 15
+    labels:
+      version: "2.0"
+    volumeMounts:
+      - name: data-lake
+        mountPath: /tmp/av/delta
+  sparkConf:
+    "spark.serializer": "org.apache.spark.serializer.KryoSerializer"
+    "spark.dynamicAllocation.enabled": "true"
+    "spark.dynamicAllocation.minExecutors": "5"
+    "spark.dynamicAllocation.maxExecutors": "50"
+    "spark.dynamicAllocation.shuffleTracking.enabled": "true"
+    "spark.sql.extensions": "io.delta.sql.DeltaSparkSessionExtension"
+    "spark.sql.catalog.spark_catalog": "org.apache.spark.sql.delta.catalog.DeltaCatalog"
+    "spark.kubernetes.executor.deleteOnTermination": "true"
+  volumes:
+    - name: checkpoints
+      persistentVolumeClaim:
+        claimName: av-checkpoints-pvc
+    - name: data-lake
+      persistentVolumeClaim:
+        claimName: av-data-lake-pvc

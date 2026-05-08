@@ -1,0 +1,64 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+dist/
+build/
+.pytest_cache/
+.mypy_cache/
+.coverage
+coverage.xml
+htmlcov/
+*.egg
+venv/
+.venv/
+env/
+
+# Node / React
+node_modules/
+frontend/dist/
+frontend/.env
+
+# Java / Spark
+*.class
+*.jar
+spark-warehouse/
+derby.log
+metastore_db/
+
+# Data files (don't commit data)
+/tmp/
+*.parquet
+*.orc
+*.avro
+*.snappy
+
+# Checkpoints
+/checkpoints/
+*.checkpoint
+
+# Docker volumes
+.docker/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+.DS_Store
+
+# Environment
+.env
+.env.local
+*.env
+
+# Secrets
+secrets/
+*.pem
+*.key
+*.p12
+
+# Logs
+*.log
+logs/

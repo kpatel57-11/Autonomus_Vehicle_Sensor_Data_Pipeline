@@ -1,0 +1,271 @@
+version: '3.9'
+
+# ── Networks ───────────────────────────────────────────────────────────────────
+networks:
+  av-net:
+    driver: bridge
+
+# ── Volumes ────────────────────────────────────────────────────────────────────
+volumes:
+  postgres_data:
+  mongo_data:
+  kafka_data:
+  zookeeper_data:
+  rabbitmq_data:
+  spark_checkpoints:
+  av_data_lake:
+
+# ═════════════════════════════════════════════════════════════════════════════
+services:
+
+  # ── Zookeeper (required by Kafka) ──────────────────────────────────────────
+  zookeeper:
+    image: confluentinc/cp-zookeeper:7.5.0
+    container_name: av-zookeeper
+    networks: [av-net]
+    environment:
+      ZOOKEEPER_CLIENT_PORT: 2181
+      ZOOKEEPER_TICK_TIME: 2000
+    volumes:
+      - zookeeper_data:/var/lib/zookeeper/data
+    healthcheck:
+      test: ["CMD", "nc", "-z", "localhost", "2181"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # ── Kafka Cluster ──────────────────────────────────────────────────────────
+  kafka:
+    image: confluentinc/cp-kafka:7.5.0
+    container_name: av-kafka
+    networks: [av-net]
+    depends_on:
+      zookeeper:
+        condition: service_healthy
+    ports:
+      - "9092:9092"
+      - "29092:29092"
+    environment:
+      KAFKA_BROKER_ID: 1
+      KAFKA_ZOOKEEPER_CONNECT: zookeeper:2181
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: PLAINTEXT:PLAINTEXT,PLAINTEXT_HOST:PLAINTEXT
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:29092,PLAINTEXT_HOST://localhost:9092
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_AUTO_CREATE_TOPICS_ENABLE: "true"
+      KAFKA_LOG_RETENTION_HOURS: 168
+      KAFKA_MESSAGE_MAX_BYTES: 10485760
+    volumes:
+      - kafka_data:/var/lib/kafka/data
+    healthcheck:
+      test: ["CMD", "kafka-broker-api-versions", "--bootstrap-server", "localhost:9092"]
+      interval: 15s
+      timeout: 10s
+      retries: 5
+
+  # ── Schema Registry ────────────────────────────────────────────────────────
+  schema-registry:
+    image: confluentinc/cp-schema-registry:7.5.0
+    container_name: av-schema-registry
+    networks: [av-net]
+    depends_on:
+      kafka:
+        condition: service_healthy
+    ports:
+      - "8081:8081"
+    environment:
+      SCHEMA_REGISTRY_HOST_NAME: schema-registry
+      SCHEMA_REGISTRY_KAFKASTORE_BOOTSTRAP_SERVERS: kafka:29092
+      SCHEMA_REGISTRY_LISTENERS: http://0.0.0.0:8081
+
+  # ── Kafka Topic Setup ──────────────────────────────────────────────────────
+  kafka-setup:
+    image: confluentinc/cp-kafka:7.5.0
+    container_name: av-kafka-setup
+    networks: [av-net]
+    depends_on:
+      kafka:
+        condition: service_healthy
+    command: >
+      bash -c "
+        echo 'Creating Kafka topics...'
+        kafka-topics --bootstrap-server kafka:29092 --create --if-not-exists --topic lidar_raw     --partitions 12 --replication-factor 1 &&
+        kafka-topics --bootstrap-server kafka:29092 --create --if-not-exists --topic camera_meta   --partitions 8  --replication-factor 1 &&
+        kafka-topics --bootstrap-server kafka:29092 --create --if-not-exists --topic gps_stream    --partitions 4  --replication-factor 1 &&
+        kafka-topics --bootstrap-server kafka:29092 --create --if-not-exists --topic av_dlq        --partitions 4  --replication-factor 1 &&
+        kafka-topics --bootstrap-server kafka:29092 --create --if-not-exists --topic av_events     --partitions 4  --replication-factor 1 &&
+        echo 'Topics created successfully'
+      "
+
+  # ── PostgreSQL (dataset metadata) ─────────────────────────────────────────
+  postgres:
+    image: postgres:16-alpine
+    container_name: av-postgres
+    networks: [av-net]
+    ports:
+      - "5432:5432"
+    environment:
+      POSTGRES_DB: av_metadata
+      POSTGRES_USER: avuser
+      POSTGRES_PASSWORD: avpassword
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./scripts/init_postgres.sql:/docker-entrypoint-initdb.d/init.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U avuser -d av_metadata"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # ── MongoDB (pipeline recipes) ─────────────────────────────────────────────
+  mongodb:
+    image: mongo:7.0
+    container_name: av-mongodb
+    networks: [av-net]
+    ports:
+      - "27017:27017"
+    environment:
+      MONGO_INITDB_ROOT_USERNAME: avadmin
+      MONGO_INITDB_ROOT_PASSWORD: avpassword
+      MONGO_INITDB_DATABASE: av_pipeline
+    volumes:
+      - mongo_data:/data/db
+      - ./scripts/init_mongo.js:/docker-entrypoint-initdb.d/init.js:ro
+    healthcheck:
+      test: ["CMD", "mongosh", "--eval", "db.adminCommand('ping')"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # ── RabbitMQ (DLQ + events) ────────────────────────────────────────────────
+  rabbitmq:
+    image: rabbitmq:3.13-management-alpine
+    container_name: av-rabbitmq
+    networks: [av-net]
+    ports:
+      - "5672:5672"
+      - "15672:15672"   # Management UI
+    environment:
+      RABBITMQ_DEFAULT_USER: avuser
+      RABBITMQ_DEFAULT_PASS: avpassword
+      RABBITMQ_DEFAULT_VHOST: /
+    volumes:
+      - rabbitmq_data:/var/lib/rabbitmq
+    healthcheck:
+      test: ["CMD", "rabbitmq-diagnostics", "ping"]
+      interval: 15s
+      timeout: 10s
+      retries: 5
+
+  # ── Backend API ────────────────────────────────────────────────────────────
+  backend:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile.backend
+    container_name: av-backend
+    networks: [av-net]
+    ports:
+      - "8000:8000"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      mongodb:
+        condition: service_healthy
+      kafka:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+    environment:
+      KAFKA_BOOTSTRAP_SERVERS: kafka:29092
+      SCHEMA_REGISTRY_URL: http://schema-registry:8081
+      MONGO_URI: mongodb://avadmin:avpassword@mongodb:27017/av_pipeline?authSource=admin
+      POSTGRES_HOST: postgres
+      POSTGRES_PORT: "5432"
+      POSTGRES_DB: av_metadata
+      POSTGRES_USER: avuser
+      POSTGRES_PASSWORD: avpassword
+      RABBITMQ_HOST: rabbitmq
+      RABBITMQ_PORT: "5672"
+      SPARK_MASTER: local[4]
+      HDFS_BASE: /tmp/av
+      PIPELINE_MODE: batch
+      LOG_LEVEL: INFO
+    volumes:
+      - spark_checkpoints:/tmp/av/checkpoints
+      - av_data_lake:/tmp/av/delta
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 20s
+      timeout: 10s
+      retries: 5
+      start_period: 30s
+
+  # ── Frontend ───────────────────────────────────────────────────────────────
+  frontend:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile.frontend
+    container_name: av-frontend
+    networks: [av-net]
+    ports:
+      - "3000:80"
+    depends_on:
+      backend:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "http://localhost/"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+
+  # ── Prometheus ─────────────────────────────────────────────────────────────
+  prometheus:
+    image: prom/prometheus:v2.48.0
+    container_name: av-prometheus
+    networks: [av-net]
+    ports:
+      - "9090:9090"
+    volumes:
+      - ./prometheus.yml:/etc/prometheus/prometheus.yml:ro
+    command:
+      - '--config.file=/etc/prometheus/prometheus.yml'
+      - '--storage.tsdb.retention.time=15d'
+
+  # ── Grafana ────────────────────────────────────────────────────────────────
+  grafana:
+    image: grafana/grafana:10.2.0
+    container_name: av-grafana
+    networks: [av-net]
+    ports:
+      - "3001:3000"
+    environment:
+      GF_SECURITY_ADMIN_PASSWORD: avpassword
+      GF_USERS_ALLOW_SIGN_UP: "false"
+    volumes:
+      - ./grafana/dashboards:/etc/grafana/provisioning/dashboards:ro
+      - ./grafana/datasources:/etc/grafana/provisioning/datasources:ro
+    depends_on:
+      - prometheus
+
+  # ── Airflow (simplified single-container mode) ─────────────────────────────
+  airflow:
+    image: apache/airflow:2.8.0-python3.11
+    container_name: av-airflow
+    networks: [av-net]
+    ports:
+      - "8080:8080"
+    environment:
+      AIRFLOW__CORE__EXECUTOR: LocalExecutor
+      AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://avuser:avpassword@postgres/av_metadata
+      AIRFLOW__CORE__LOAD_EXAMPLES: "false"
+      AIRFLOW__WEBSERVER__SECRET_KEY: av-pipeline-secret-key
+      _AIRFLOW_DB_MIGRATE: "true"
+      _AIRFLOW_WWW_USER_CREATE: "true"
+      _AIRFLOW_WWW_USER_USERNAME: admin
+      _AIRFLOW_WWW_USER_PASSWORD: avpassword
+    volumes:
+      - ../backend/airflow/dags:/opt/airflow/dags
+      - ../backend:/opt/av-pipeline/backend
+    depends_on:
+      postgres:
+        condition: service_healthy
+    command: standalone
